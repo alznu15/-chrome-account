@@ -4,7 +4,7 @@ import zipfile
 import subprocess
 import shutil
 from threading import Timer
-from flask import Flask, request, redirect, url_for
+from flask import Flask, request, redirect, url_for, send_from_directory
 from werkzeug.middleware.proxy_fix import ProxyFix
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
@@ -12,11 +12,14 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 import io
 
+# 強制告訴 Google 函式庫：我就是 HTTPS，別跟我爭！
 os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET", "super_secret_history_key")
-app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
+
+# 告訴 Flask 正確處理 Render 的 Proxy 標頭
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1, x_prefix=1)
 
 # --- 參數設定 ---
 IDLE_LIMIT = 15 * 60         
@@ -32,7 +35,7 @@ user_credentials = None
 chrome_process = None  
 
 def get_redirect_uri():
-    # 🎯 直接綁定你在 Google Console 設定好的 Render 專屬網址
+    # 🎯 萬無一失的寫法：直接給它最精準、帶有 https 的官方網址
     return 'https://chrome-account.onrender.com/oauth2callback'
 
 def get_drive_service():
@@ -87,8 +90,8 @@ def launch_cloud_chrome():
         subprocess.Popen(["fluxbox"])
         subprocess.Popen(["x11vnc", "-display", ":1", "-nopw", "-forever", "-shared"])
         
-        print("🖥️ 啟動 Websocket 影像轉發 (Port 6080)...")
-        subprocess.Popen(["websockify", "--web", "/usr/share/novnc", "6080", "127.0.0.1:5900"])
+        print("🖥️ 啟動 Websocket 影像轉發 (Port 5800)...")
+        subprocess.Popen(["websockify", "127.0.0.1:5800", "127.0.0.1:5900"])
         
         os.makedirs(LOCAL_COOKIE_DIR, exist_ok=True)
         print("🚀 啟動 Chromium 瀏覽器核心...")
@@ -166,7 +169,7 @@ def home():
             a { display: inline-block; background-color: #22c55e; color: white; padding: 12px 24px; text-transform: uppercase; text-decoration: none; border-radius: 6px; font-weight: bold; margin-top: 20px; }
             a:hover { background-color: #16a34a; }
         </style>
-        <h2>🟢 歷史專案同步系統 (Render 穩定版)</h2>
+        <h2>🟢 歷史專案同步系統 (Render 網址修正版)</h2>
         <a href="/auth">👉 點此與學校雲端空間進行安全串接</a>
         '''
     
@@ -176,27 +179,41 @@ def home():
         <body style="background-color: #0f172a; color: #f8fafc; font-family: Arial; padding: 20px; text-align: center; margin: 0;">
             <h1 style="color: #22c55e; margin: 10px 0;">🟢 歷史研究中控台 授權成功</h1>
             <div style="max-width: 1280px; margin: 20px auto; border: 4px solid #334155; border-radius: 8px; overflow: hidden; background: #000;">
-                <iframe src="/vnc/vnc.html?autoconnect=true&resize=scale&path=vnc/websockify" style="width: 100%; height: 720px; border: none;"></iframe>
+                <iframe src="/vnc_static/vnc.html?autoconnect=true&resize=scale&port=5800" style="width: 100%; height: 720px; border: none;"></iframe>
             </div>
         </body>
     </html>
     """
 
+@app.route('/vnc_static/<path:filename>')
+def vnc_static(filename):
+    return send_from_directory('/usr/share/novnc', filename)
+
 @app.route('/auth')
 def auth():
     try:
-        flow = Flow.from_client_secrets_file('client_secret.json', scopes=SCOPES, redirect_uri=get_redirect_uri())
+        # 🎯 強制指定 redirect_uri，阻斷 Google 套件自行瞎猜
+        flow = Flow.from_client_secrets_file(
+            'client_secret.json', 
+            scopes=SCOPES, 
+            redirect_uri=get_redirect_uri()
+        )
         authorization_url, state = flow.authorization_url(access_type='offline', include_granted_scopes='true')
         return redirect(authorization_url)
     except Exception as e:
-        return f"<h2 style='color:red;'>系統錯誤：找不到憑證</h2><p>錯誤細節: {str(e)}</p>"
+        return f"<h2 style='color:red;'>系統錯誤：憑證或設定異常</h2><p>錯誤細節: {str(e)}</p>"
 
 @app.route('/oauth2callback')
 def oauth2callback():
     global user_credentials
-    flow = Flow.from_client_secrets_file('client_secret.json', scopes=SCOPES, redirect_uri=get_redirect_uri())
+    # 🎯 回傳校正：這裡也強制塞入正確的重新導向網址
+    flow = Flow.from_client_secrets_file(
+        'client_secret.json', 
+        scopes=SCOPES, 
+        redirect_uri=get_redirect_uri()
+    )
     
-    # 解決 HTTPS 代理降級問題
+    # 再次防禦：強制確保 callback 的比對網址是 https 開頭
     current_url = request.url
     if current_url.startswith("http://"):
         current_url = current_url.replace("http://", "https://")
@@ -206,48 +223,10 @@ def oauth2callback():
     download_and_cleanup_from_drive()
     return redirect(url_for('home'))
 
-def start_internal_proxy():
-    """動態生成 Nginx 設定檔，解決 Render 單一 Port 限制"""
-    # 抓取 Render 平台給的外部 Port (預設通常是 10000)
-    render_port = os.environ.get("PORT", "10000")
-    print(f"🔗 正在綁定 Render 對外 Port: {render_port}")
-    
-    nginx_conf = f"""
-    events {{ worker_connections 1024; }}
-    http {{
-        include /etc/nginx/mime.types;
-        server {{
-            listen {render_port};
-            
-            # 路由 1: 桌面影像串流轉發到 6080
-            location /vnc/ {{
-                proxy_pass http://127.0.0.1:6080/;
-                proxy_http_version 1.1;
-                proxy_set_header Upgrade $http_upgrade;
-                proxy_set_header Connection "Upgrade";
-            }}
-            
-            # 路由 2: 中控網頁轉發到 Flask (5000)
-            location / {{
-                proxy_pass http://127.0.0.1:5000/;
-                proxy_set_header Host $host;
-                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-                proxy_set_header X-Forwarded-Proto $scheme;
-            }}
-        }}
-    }}
-    """
-    with open("/tmp/render_nginx.conf", "w") as f:
-        f.write(nginx_conf)
-    
-    # 在背景啟動 Nginx 代理器
-    subprocess.Popen(["nginx", "-c", "/tmp/render_nginx.conf"])
-
 if __name__ == '__main__':
     start_countdown_monitor()
     
-    # 啟動內部 Nginx 路由，負責接手 Render 進來的所有流量
-    start_internal_proxy()
-    
-    # Flask 安穩地跑在內部 5000 Port 即可
-    app.run(host='127.0.0.1', port=5000)
+    # 讓 Flask 直接在 Render 分配的通訊埠開門
+    render_port = int(os.environ.get("PORT", 10000))
+    print(f"🔗 系統就緒！對外連線埠已重設為: {render_port}")
+    app.run(host='0.0.0.0', port=render_port)
