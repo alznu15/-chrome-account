@@ -3,12 +3,13 @@ import time
 import zipfile
 import shutil
 from threading import Timer
-from flask import Flask, render_template_string, request, redirect, url_for
+from flask import Flask, render_template_string, request, redirect, url_for, Response
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 import io
+import requests  # 引入代理功能所需的網路請求模組
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET", "super_secret_history_key")
@@ -91,7 +92,6 @@ def upload_to_school_drive():
         zip_buffer.seek(0)
         # 上傳到 Google Drive
         file_metadata = {'name': SHIELD_FILE_NAME, 'mimeType': 'application/zip'}
-        media = MediaFileUpload(LOCAL_COOKIE_DIR, mimetype='application/zip', resumable=True)
         
         # 建立臨時檔案並上傳
         with open('temp_backup.zip', 'wb') as f:
@@ -133,7 +133,7 @@ def start_countdown_monitor():
     t.daemon = True
     t.start()
 
-# --- 🌐 Flask 網頁路由（你的登入驗證中控台） ---
+# --- 🌐 Flask 網頁路由（你的登入驗證與網頁代理中控台） ---
 
 @app.route('/')
 def home():
@@ -144,17 +144,51 @@ def home():
     if not user_credentials:
         return '<h2>🟢 歷史專案同步系統</h2><p>尚未偵測到 Google 驗證授權。</p><a href="/auth">👉 點此開始與學校 50GB 空間進行合規串接</a>'
     
+    # 驗證成功後，渲染包含網頁代理輸入框與 Iframe 的進階介面
     return """
     <html>
-        <head><title>History Research Sync Center</title></head>
-        <body style="background-color: #0f172a; color: #f8fafc; font-family: Arial; padding: 40px; text-align: center;">
-            <h1 style="color: #22c55e;">🟢 歷史研究中控台 授權成功</h1>
-            <p>Render 免費版計時器已成功重置。當前狀態：<b>安全、無痕、自動化運作中</b></p>
-            <div style="border: 1px solid #334155; padding: 20px; display: inline-block; margin-top: 20px; border-radius: 8px; background-color: #1e293b;">
-                <p>學校 50GB 硬碟狀態：<span style="color: #4ade80;">0 個殘留備份（完美隱形）</span></p>
-                <p>無痕備份假名：<code>History_Project_Research_Notes_Backup.zip</code></p>
+        <head>
+            <title>History Research Sync Center</title>
+            <style>
+                body { background-color: #0f172a; color: #f8fafc; font-family: Arial; padding: 20px; text-align: center; margin: 0; }
+                .status-title { color: #22c55e; margin-top: 10px; }
+                .info-box { border: 1px solid #334155; padding: 15px; display: inline-block; margin-top: 10px; border-radius: 8px; background-color: #1e293b; text-align: left; }
+                .proxy-container { max-width: 1000px; margin: 20px auto 0 auto; background: #1e293b; border-radius: 8px; padding: 15px; border: 1px solid #334155; }
+                .address-bar { display: flex; gap: 10px; margin-bottom: 15px; }
+                .url-input { flex: 1; padding: 10px; border-radius: 4px; border: 1px solid #475569; background: #0f172a; color: #fff; font-size: 14px; }
+                .go-btn { background: #22c55e; color: #0f172a; border: none; padding: 10px 20px; font-weight: bold; border-radius: 4px; cursor: pointer; }
+                .go-btn:hover { background: #4ade80; }
+                .browser-viewport { width: 100%; height: 65vh; border: none; border-radius: 6px; background: #ffffff; }
+            </style>
+            <script>
+                function navigateToUrl() {
+                    var inputUrl = document.getElementById('target_url').value;
+                    if (!inputUrl) return;
+                    if (!inputUrl.startsWith('http://') && !inputUrl.startsWith('https://')) {
+                        inputUrl = 'https://' + inputUrl;
+                    }
+                    document.getElementById('viewport_frame').src = '/proxy?url=' + encodeURIComponent(inputUrl);
+                }
+            </script>
+        </head>
+        <body>
+            <h1 class="status-title">🟢 歷史研究中控台 授權成功</h1>
+            <p style="margin: 5px 0;">Render 免費版計時器已成功重置。當前狀態：<b>安全、無痕、自動化運作中</b></p>
+            
+            <div class="info-box">
+                <span style="display:block;">學校 50GB 硬碟狀態：<span style="color: #4ade80;">0 個殘留備份（完美隱形）</span></span>
+                <span style="display:block; margin-top: 5px;">無痕備份假名：<code>History_Project_Research_Notes_Backup.zip</code></span>
             </div>
-            <p style="margin-top: 30px; color: #94a3b8; font-size: 12px;">※ 當你關閉分頁 14 分 45 秒後，系統會自動在背景秒傳加密 Cookie 並進入休眠。</p>
+            
+            <div class="proxy-container">
+                <div class="address-bar">
+                    <input type="text" id="target_url" class="url-input" placeholder="輸入要前往的個人網站網址 (例如: google.com 或 instagram.com)" onkeydown="if(event.keyCode==13) navigateToUrl()">
+                    <button class="go-btn" onclick="navigateToUrl()">前往</button>
+                </div>
+                <iframe id="viewport_frame" class="browser-viewport" src="/proxy?url=https://www.google.com"></iframe>
+            </div>
+
+            <p style="margin-top: 15px; color: #94a3b8; font-size: 12px;">※ 當你關閉分頁 14 分 45 秒後，系統會自動在背景秒傳加密 Cookie 並進入休眠。</p>
         </body>
     </html>
     """
@@ -162,7 +196,6 @@ def home():
 @app.route('/auth')
 def auth():
     """ 導向 Google 官方的 Oauth 2.0 安全驗證渠道 """
-    # 這裡會讀取你上傳的 client_secret.json (稍後會教你拿)
     flow = Flow.from_client_secrets_file('client_secret.json', scopes=SCOPES, redirect_uri=request.url_root + 'oauth2callback')
     authorization_url, state = flow.authorization_url(access_type='offline', include_granted_scopes='true')
     return redirect(authorization_url)
@@ -178,6 +211,32 @@ def oauth2callback():
     # 登入成功後，立刻去拉一次有沒有昨天的記憶
     download_and_cleanup_from_drive()
     return redirect(url_for('home'))
+
+# --- 🌐 核心：雲端安全網頁代理路由器 ---
+@app.route('/proxy')
+def proxy():
+    global user_credentials
+    if not user_credentials:
+        return "未授權存取，請先完成主頁驗證連結", 403
+        
+    target_url = request.args.get('url')
+    if not target_url:
+        return "請輸入有效網址", 400
+
+    try:
+        # 由 Render 雲端伺服器後端代替 Chromebook 發出請求，完美繞過所有學校本機的限制與追蹤
+        custom_headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        proxied_res = requests.get(target_url, headers=custom_headers, timeout=12)
+        
+        # 過濾掉可能干擾瀏覽器內嵌渲染的串流快取傳輸標頭
+        banned_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
+        cleaned_headers = [(k, v) for k, v in proxied_res.raw.headers.items() if k.lower() not in banned_headers]
+        
+        return Response(proxied_res.content, proxied_res.status_code, cleaned_headers)
+    except Exception as error:
+        return f"雲端代理連線失敗（目標網站可能有限制）：{str(error)}", 500
 
 if __name__ == '__main__':
     start_countdown_monitor()
